@@ -13,6 +13,41 @@ const { requireLogin, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
+// ─────────────────────────────────────────────────────────
+// GET /api/auth/me
+// Lets the frontend restore a logged-in session after a page reload,
+// since the browser only keeps the token — not who that token belongs
+// to. Given a valid token, this re-fetches the current, live account
+// details (so a role change, deactivation, etc. is reflected immediately
+// rather than trusting whatever was true at the moment of original login).
+// ─────────────────────────────────────────────────────────
+router.get('/me', requireLogin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT u.role, u.display_name, u.email, u.is_active, m.house_number
+       FROM users u
+       LEFT JOIN members m ON m.id = u.member_id
+       WHERE u.id = $1`,
+      [req.user.userId]
+    );
+    const user = result.rows[0];
+    if (!user || !user.is_active) {
+      return res.status(401).json({ error: 'Session no longer valid. Please log in again.' });
+    }
+    return res.json({
+      user: {
+        role: user.role,
+        displayName: user.display_name,
+        email: user.email,
+        houseNumber: user.house_number || null,
+      },
+    });
+  } catch (err) {
+    console.error('GET /auth/me error:', err);
+    return res.status(500).json({ error: 'Something went wrong.' });
+  }
+});
+
 router.post('/login', async (req, res) => {
   try {
     const { identifier, password } = req.body;
