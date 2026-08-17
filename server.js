@@ -4,6 +4,7 @@ const cors = require('cors');
 
 const authRoutes = require('./routes/auth');
 const memberRoutes = require('./routes/members');
+const complaintRoutes = require('./routes/complaints');
 
 const app = express();
 
@@ -27,10 +28,10 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/members', memberRoutes);
+app.use('/api/complaints', complaintRoutes);
 
 // TODO: as you extend the app, add more route files here following the
 // same pattern as routes/members.js — e.g.:
-//   app.use('/api/complaints', require('./routes/complaints'));
 //   app.use('/api/bills', require('./routes/bills'));
 //   app.use('/api/notices', require('./routes/notices'));
 
