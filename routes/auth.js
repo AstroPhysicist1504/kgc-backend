@@ -24,7 +24,7 @@ const router = express.Router();
 router.get('/me', requireLogin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT u.role, u.display_name, u.email, u.is_active, m.house_number
+      `SELECT u.role, u.display_name, u.email, u.is_active, u.member_id, m.house_number
        FROM users u
        LEFT JOIN members m ON m.id = u.member_id
        WHERE u.id = $1`,
@@ -40,6 +40,7 @@ router.get('/me', requireLogin, async (req, res) => {
         displayName: user.display_name,
         email: user.email,
         houseNumber: user.house_number || null,
+        memberId: user.member_id || null,
       },
     });
   } catch (err) {
@@ -130,6 +131,7 @@ router.post('/login', async (req, res) => {
         displayName: user.display_name,
         email: user.email,
         houseNumber: user.house_number || null,
+        memberId: user.member_id || null,
       },
     });
   } catch (err) {

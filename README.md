@@ -13,19 +13,22 @@ backend/
   server.js           → starts the server, wires up routes
   db/pool.js           → the one shared database connection
   middleware/auth.js   → checks "who is logged in?" and "are they allowed to do this?"
-  routes/auth.js       → POST /api/auth/login
-  routes/members.js    → example CRUD routes for the `members` table (the template to copy)
+  routes/auth.js       → login, /me (session restore), change-password, admin reset-password
+  routes/members.js    → CRUD for the `members` table (the template to copy)
+  routes/complaints.js → full complaint lifecycle (raise, view, update status, rate)
   .env.example         → copy to .env and fill in your real values
   package.json
 ```
 
 This was tested end-to-end on a local Postgres database with the same
-schema as your Supabase project — login, permission checks, and data
-isolation between a resident and an admin were all verified working.
+schema as your Supabase project — login, password changes, admin resets,
+the full complaint lifecycle, and permission checks between a resident
+and an admin were all verified working.
 
-**Only `auth.js` and `members.js` are built out.** The other 15 tables
-(complaints, hall_bookings, notices, etc.) follow the exact same pattern
-as `members.js` — see "Adding more routes" below.
+**Tables with real backend routes so far:** `users` (auth), `members`,
+`complaints` + `complaint_updates`. The other 13 tables (bills, notices,
+hall bookings, gym memberships, etc.) follow the exact same pattern as
+`members.js` / `complaints.js` — see "Adding more routes" below.
 
 ## 1. Local setup
 

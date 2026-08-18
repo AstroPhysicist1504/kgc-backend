@@ -93,7 +93,7 @@ router.get('/:id', requireLogin, async (req, res) => {
 // POST /api/complaints — any logged-in resident (or staff, on a resident's behalf) can raise one
 router.post('/', requireLogin, async (req, res) => {
   try {
-    const { title, description, category, priority, photoUrl, memberId: bodyMemberId } = req.body;
+    const { title, description, category, priority, photoUrl, houseNumber } = req.body;
 
     if (!title || !description) {
       return res.status(400).json({ error: 'Title and description are required.' });
@@ -106,10 +106,15 @@ router.post('/', requireLogin, async (req, res) => {
     }
 
     // Residents can only file on their own behalf. Staff may file on behalf
-    // of a member (e.g. a phone complaint logged by the office) by passing memberId.
+    // of a member (e.g. a phone complaint logged by the office) by passing
+    // that member's house number — staff won't know internal database IDs.
     let memberId = req.user.memberId;
-    if (req.user.role !== 'resident' && bodyMemberId) {
-      memberId = bodyMemberId;
+    if (req.user.role !== 'resident' && houseNumber) {
+      const memberLookup = await pool.query(`SELECT id FROM members WHERE house_number = $1`, [houseNumber.trim()]);
+      if (memberLookup.rows.length === 0) {
+        return res.status(404).json({ error: `No member found with house number "${houseNumber}".` });
+      }
+      memberId = memberLookup.rows[0].id;
     }
     if (!memberId) {
       return res.status(400).json({ error: 'No member is associated with this complaint.' });
