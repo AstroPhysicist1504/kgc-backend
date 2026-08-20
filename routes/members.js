@@ -184,4 +184,103 @@ router.post('/import', requireLogin, requireRole('super_admin', 'committee'), as
   }
 });
 
+// PUT /api/members/:id — edit an existing member's profile (committee/admin only)
+router.put('/:id', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      fullName, houseNumber, unitType, ownershipType, ownerName,
+      phonePrimary, phoneSecondary, email, familySize, moveInDate,
+      vehicle1Reg, vehicle2Reg, parkingSlot,
+      emergencyContactName, emergencyContactPhone,
+      idProofType, idProofNumber, notes,
+    } = req.body;
+
+    if (!fullName || !houseNumber || !unitType || !phonePrimary || !moveInDate) {
+      return res.status(400).json({ error: 'Missing required fields.' });
+    }
+    if ((ownershipType || 'owner') === 'tenant' && !ownerName) {
+      return res.status(400).json({ error: 'Tenant records must include the property owner\'s name.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE members SET
+         full_name = $1, house_number = $2, unit_type = $3, ownership_type = $4, owner_name = $5,
+         phone_primary = $6, phone_secondary = $7, email = $8, family_size = COALESCE($9, family_size),
+         move_in_date = $10, vehicle_1_reg = $11, vehicle_2_reg = $12, parking_slot = $13,
+         emergency_contact_name = $14, emergency_contact_phone = $15,
+         id_proof_type = $16, id_proof_number = $17, notes = $18, updated_at = NOW()
+       WHERE id = $19
+       RETURNING id`,
+      [
+        fullName, houseNumber, unitType, ownershipType || 'owner', ownerName || null,
+        phonePrimary, phoneSecondary || null, email || null, familySize || null, moveInDate,
+        vehicle1Reg || null, vehicle2Reg || null, parkingSlot || null,
+        emergencyContactName || null, emergencyContactPhone || null,
+        idProofType || null, idProofNumber || null, notes || null, id,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Member not found.' });
+    }
+    return res.json({ message: 'Member updated.', id: result.rows[0].id });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Another member already has that house number.' });
+    }
+    console.error('PUT /members/:id error:', err);
+    return res.status(500).json({ error: 'Could not update member.' });
+  }
+});
+
+// PATCH /api/members/:id/active — activate or deactivate a member (committee/admin only)
+// This is the SAFER way to "remove" someone who has moved out but has
+// existing history (complaints, bills, bookings) — it hides them from
+// active views without breaking that history's link to a real person.
+router.patch('/:id/active', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'isActive must be true or false.' });
+    }
+    const result = await pool.query(
+      `UPDATE members SET is_active = $1, updated_at = NOW() WHERE id = $2 RETURNING id`,
+      [isActive, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Member not found.' });
+    }
+    return res.json({ message: isActive ? 'Member reactivated.' : 'Member marked inactive.' });
+  } catch (err) {
+    console.error('PATCH /members/:id/active error:', err);
+    return res.status(500).json({ error: 'Could not update member status.' });
+  }
+});
+
+// DELETE /api/members/:id — permanently removes a member (super_admin only).
+// The database itself blocks this if the member has any existing
+// complaints, bills, bookings, etc. (by design — that history shouldn't
+// silently vanish). In that case, we return a clear explanation instead
+// of a raw database error, and point toward deactivating instead.
+router.delete('/:id', requireLogin, requireRole('super_admin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(`DELETE FROM members WHERE id = $1 RETURNING id`, [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Member not found.' });
+    }
+    return res.json({ message: 'Member deleted.' });
+  } catch (err) {
+    if (err.code === '23503') { // foreign_key_violation
+      return res.status(409).json({
+        error: 'This member has existing records (complaints, bills, bookings, etc.) and cannot be permanently deleted. Mark them Inactive instead to remove them from active views while preserving their history.',
+      });
+    }
+    console.error('DELETE /members/:id error:', err);
+    return res.status(500).json({ error: 'Could not delete member.' });
+  }
+});
+
 module.exports = router;
