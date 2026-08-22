@@ -36,13 +36,17 @@ router.get('/rates', requireLogin, async (req, res) => {
 // with optional ?financialYear=2025-26 and ?status=unpaid filters.
 router.get('/', requireLogin, async (req, res) => {
   try {
-    const { financialYear, status } = req.query;
+    const { financialYear, status, memberId } = req.query;
     const conditions = [];
     const params = [];
 
     if (req.user.role === 'resident') {
       if (!req.user.memberId) return res.status(404).json({ error: 'No member record linked to this account.' });
       params.push(req.user.memberId);
+      conditions.push(`b.member_id = $${params.length}`);
+    } else if (memberId) {
+      // Staff viewing a specific member's bills (e.g. from that member's profile page)
+      params.push(memberId);
       conditions.push(`b.member_id = $${params.length}`);
     }
     if (financialYear) {
@@ -88,9 +92,17 @@ router.get('/:id', requireLogin, async (req, res) => {
     }
 
     const payments = await pool.query(
-      `SELECT id, receipt_number_auto, receipt_number_manual, payment_date, amount_paid,
-              payment_mode, is_verified, remarks
-       FROM maintenance_payments WHERE bill_id = $1 ORDER BY payment_date DESC`,
+      `SELECT p.id, p.receipt_number_auto, p.receipt_number_manual, p.bill_book_number,
+              p.payment_date, p.amount_paid, p.amount_towards_principal, p.amount_towards_late_fee,
+              p.balance_outstanding, p.payment_mode, p.is_verified, p.remarks,
+              p.cheque_number, p.cheque_date, p.bank_name,
+              p.demand_draft_number, p.dd_bank_name, p.dd_date,
+              p.upi_transaction_id, p.upi_app,
+              p.bank_reference_number, p.transfer_bank_name,
+              u.display_name AS collected_by_name
+       FROM maintenance_payments p
+       LEFT JOIN users u ON u.id = p.collected_by
+       WHERE p.bill_id = $1 ORDER BY p.payment_date DESC`,
       [id]
     );
     return res.json({ ...bill, payments: payments.rows });
