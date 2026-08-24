@@ -6,6 +6,7 @@ const authRoutes = require('./routes/auth');
 const memberRoutes = require('./routes/members');
 const complaintRoutes = require('./routes/complaints');
 const billRoutes = require('./routes/bills');
+const noticeRoutes = require('./routes/notices');
 
 const app = express();
 
@@ -31,10 +32,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/members', memberRoutes);
 app.use('/api/complaints', complaintRoutes);
 app.use('/api/bills', billRoutes);
-
-// TODO: as you extend the app, add more route files here following the
-// same pattern as routes/members.js — e.g.:
-//   app.use('/api/notices', require('./routes/notices'));
+app.use('/api/notices', noticeRoutes);
 
 // Catch-all error handler — never leak raw error details to the client
 app.use((err, req, res, next) => {
