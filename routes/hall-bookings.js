@@ -208,6 +208,9 @@ router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'
     const { id } = req.params;
     const { newStatus, rejectionReason, notes } = req.body;
 
+    // Log incoming request so we can see it in Render logs
+    console.log(`PATCH /hall-bookings/${id}/status — user role: ${req.user.role}, newStatus: ${newStatus}`);
+
     if (!newStatus || !VALID_STATUSES.includes(newStatus)) {
       return res.status(400).json({ error: 'Invalid or missing status.' });
     }
@@ -221,6 +224,8 @@ router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'
     if (current.rows.length === 0) {
       return res.status(404).json({ error: 'Booking not found.' });
     }
+
+    console.log(`Current booking status: ${current.rows[0].status}`);
 
     const allowed = {
       pending:   ['confirmed', 'rejected', 'cancelled'],
@@ -238,7 +243,7 @@ router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'
     try {
       await pool.query(
         `UPDATE hall_bookings SET
-           status           = $1,
+           status           = $1::booking_status,
            rejection_reason = CASE WHEN $1 = 'rejected' THEN $2 ELSE rejection_reason END,
            notes            = COALESCE($3, notes),
            approved_by      = CASE WHEN $1 = 'confirmed' THEN $4 ELSE approved_by END,
@@ -247,18 +252,22 @@ router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'
         [newStatus, rejectionReason || null, notes || null, req.user.userId, id]
       );
     } catch (dbErr) {
+      console.error('PATCH /hall-bookings/:id/status DB error:', dbErr.code, dbErr.message);
       if (dbErr.code === '23505') {
         return res.status(409).json({
           error: 'This date and time slot is already confirmed for another booking. The slot cannot be double-booked.',
         });
       }
-      throw dbErr;
+      // Return the real DB error message so we can diagnose it
+      return res.status(500).json({
+        error: `Database error: ${dbErr.message}`,
+      });
     }
 
     return res.json({ message: `Booking ${newStatus}.`, newStatus });
   } catch (err) {
     console.error('PATCH /hall-bookings/:id/status error:', err);
-    return res.status(500).json({ error: 'Could not update booking.' });
+    return res.status(500).json({ error: `Could not update booking: ${err.message}` });
   }
 });
 
