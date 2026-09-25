@@ -8,6 +8,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireLogin, requireRole, canDelete, canWrite, canManage } = require('../middleware/auth');
+const STAFF_ROLES = ['super_admin','president','secretary','treasurer','manager','committee'];
 
 const router = express.Router();
 
@@ -16,7 +17,7 @@ const router = express.Router();
 // resident                → see only their own household record
 router.get('/', requireLogin, async (req, res) => {
   try {
-    if (req.user.role === 'super_admin' || req.user.role === 'committee') {
+    if (STAFF_ROLES.includes(req.user.role)) {
       const result = await pool.query(
         `SELECT id, full_name, house_number, unit_type,
                 phone_primary, email, is_active
@@ -49,7 +50,7 @@ router.get('/:id', requireLogin, async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (req.user.role === 'resident' && req.user.memberId !== id) {
+    if (!STAFF_ROLES.includes(req.user.role) && req.user.memberId !== id) {
       return res.status(403).json({ error: 'You can only view your own profile.' });
     }
 

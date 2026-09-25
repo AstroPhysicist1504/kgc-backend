@@ -24,6 +24,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
+const STAFF_ROLES = ['super_admin','president','secretary','treasurer','manager','committee'];
 
 const router = express.Router();
 
@@ -75,7 +76,7 @@ router.get('/', requireLogin, async (req, res) => {
     const conditions = [];
     const params = [];
 
-    if (req.user.role === 'resident') {
+    if (!STAFF_ROLES.includes(req.user.role)) {
       if (!req.user.memberId) {
         return res.status(404).json({ error: 'No member record linked to this account.' });
       }

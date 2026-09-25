@@ -12,6 +12,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireLogin, canWrite, canManage } = require('../middleware/auth');
+const STAFF_ROLES = ['super_admin','president','secretary','treasurer','manager','committee'];
 
 const router = express.Router();
 
@@ -40,7 +41,7 @@ router.get('/', requireLogin, async (req, res) => {
     const conditions = [];
     const params = [];
 
-    if (req.user.role === 'resident') {
+    if (!STAFF_ROLES.includes(req.user.role)) {
       if (!req.user.memberId) return res.status(404).json({ error: 'No member record linked to this account.' });
       params.push(req.user.memberId);
       conditions.push(`b.member_id = $${params.length}`);
@@ -87,7 +88,7 @@ router.get('/:id', requireLogin, async (req, res) => {
     );
     const bill = result.rows[0];
     if (!bill) return res.status(404).json({ error: 'Bill not found.' });
-    if (req.user.role === 'resident' && bill.member_id !== req.user.memberId) {
+    if (!STAFF_ROLES.includes(req.user.role) && bill.member_id !== req.user.memberId) {
       return res.status(403).json({ error: 'You can only view your own bills.' });
     }
 

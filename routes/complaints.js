@@ -10,7 +10,8 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
+const { requireLogin, requireRole, canDelete, canWrite, canManage } = require('../middleware/auth');
+const STAFF_ROLES = ['super_admin','president','secretary','treasurer','manager','committee'];
 
 const router = express.Router();
 
@@ -34,7 +35,7 @@ router.get('/', requireLogin, async (req, res) => {
       LEFT JOIN users u ON u.id = c.assigned_to
     `;
 
-    if (req.user.role === 'super_admin' || req.user.role === 'committee') {
+    if (STAFF_ROLES.includes(req.user.role)) {
       const result = await pool.query(`${baseSelect} ORDER BY c.created_at DESC`);
       return res.json(result.rows);
     }
@@ -70,7 +71,7 @@ router.get('/:id', requireLogin, async (req, res) => {
     if (!complaint) {
       return res.status(404).json({ error: 'Complaint not found.' });
     }
-    if (req.user.role === 'resident' && complaint.member_id !== req.user.memberId) {
+    if (!STAFF_ROLES.includes(req.user.role) && complaint.member_id !== req.user.memberId) {
       return res.status(403).json({ error: 'You can only view your own complaints.' });
     }
 
