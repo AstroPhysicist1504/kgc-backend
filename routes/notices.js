@@ -11,7 +11,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -43,7 +43,7 @@ router.get('/', requireLogin, async (req, res) => {
 });
 
 // POST /api/notices — committee/admin only
-router.post('/', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/', requireLogin, canManage, async (req, res) => {
   try {
     const { title, body, category, priority, visibleTo, isPinned, attachmentUrl, attachmentName, expiresAt } = req.body;
 
@@ -75,7 +75,7 @@ router.post('/', requireLogin, requireRole('super_admin', 'committee'), async (r
 });
 
 // PUT /api/notices/:id — committee/admin only
-router.put('/:id', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.put('/:id', requireLogin, canManage, async (req, res) => {
   try {
     const { id } = req.params;
     const { title, body, category, priority, visibleTo, isPinned, attachmentUrl, attachmentName, expiresAt } = req.body;
@@ -106,7 +106,7 @@ router.put('/:id', requireLogin, requireRole('super_admin', 'committee'), async 
 
 // DELETE /api/notices/:id — committee/admin only. No dependent records
 // reference notices, so this is a plain, safe delete — no history to protect.
-router.delete('/:id', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.delete('/:id', requireLogin, canDelete, async (req, res) => {
   try {
     const result = await pool.query(`DELETE FROM notices WHERE id = $1 RETURNING id`, [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Notice not found.' });

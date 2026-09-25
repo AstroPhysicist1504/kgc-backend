@@ -11,7 +11,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -115,7 +115,7 @@ router.get('/:id', requireLogin, async (req, res) => {
 // POST /api/bills/generate — bulk-generate this month's bills for every
 // active member, using the rate in effect for their unit type. Skips
 // (doesn't duplicate) any member who already has a bill for that month.
-router.post('/generate', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/generate', requireLogin, canWrite, async (req, res) => {
   try {
     const { billingMonth, financialYear } = req.body; // billingMonth e.g. "2026-08-01"
     if (!billingMonth || !financialYear) {
@@ -161,7 +161,7 @@ router.post('/generate', requireLogin, requireRole('super_admin', 'committee'), 
 // Validates the payment-mode-specific fields BEFORE hitting the database,
 // so a resident gets a clear "you forgot the cheque number" instead of a
 // raw constraint-violation error.
-router.post('/:id/payments', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/:id/payments', requireLogin, canWrite, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id: billId } = req.params;

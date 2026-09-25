@@ -8,7 +8,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool    = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -22,7 +22,7 @@ const VALID_PAYMENT_MODES = [
 // Returns all expenses, optionally filtered by month/year/category.
 // Query params: ?month=05&year=2025&category=Electricity
 // ─────────────────────────────────────────────────────────
-router.get('/', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.get('/', requireLogin, canManage, async (req, res) => {
   try {
     const { month, year, category } = req.query;
     const conditions = [];
@@ -70,7 +70,7 @@ router.get('/', requireLogin, requireRole('super_admin', 'committee'), async (re
 //   - Expenses this calendar year
 //   - Net surplus (collected - yearly expenses)
 // ─────────────────────────────────────────────────────────
-router.get('/summary', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.get('/summary', requireLogin, canManage, async (req, res) => {
   try {
     const now         = new Date();
     const thisMonth   = now.getMonth() + 1;  // 1-12
@@ -133,7 +133,7 @@ router.get('/summary', requireLogin, requireRole('super_admin', 'committee'), as
 // merged with the default seeded list, so the frontend
 // dropdown always has the full current list.
 // ─────────────────────────────────────────────────────────
-router.get('/categories', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.get('/categories', requireLogin, canManage, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT DISTINCT category
@@ -153,7 +153,7 @@ router.get('/categories', requireLogin, requireRole('super_admin', 'committee'),
 // voucher_number (VCH-YYYY-NNNN). Returns the new record
 // including the generated voucher number.
 // ─────────────────────────────────────────────────────────
-router.post('/', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/', requireLogin, canWrite, async (req, res) => {
   try {
     const {
       expenseDate, category, description,
@@ -222,7 +222,7 @@ router.post('/', requireLogin, requireRole('super_admin', 'committee'), async (r
 // processed independently — failures are reported but do not
 // block the rest of the batch.
 // ─────────────────────────────────────────────────────────
-router.post('/bulk', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/bulk', requireLogin, canWrite, async (req, res) => {
   try {
     const { expenses } = req.body;
     if (!Array.isArray(expenses) || expenses.length === 0) {
@@ -282,7 +282,7 @@ router.post('/bulk', requireLogin, requireRole('super_admin', 'committee'), asyn
 // DELETE /api/expenses/:id
 // Super admin only — hard delete a recorded expense.
 // ─────────────────────────────────────────────────────────
-router.delete('/:id', requireLogin, requireRole('super_admin'), async (req, res) => {
+router.delete('/:id', requireLogin, canDelete, async (req, res) => {
   try {
     const result = await pool.query(
       `DELETE FROM society_expenses WHERE id = $1 RETURNING id, voucher_number`,

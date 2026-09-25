@@ -9,7 +9,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const pool = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, requireRole, canDelete, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -188,7 +188,7 @@ router.post('/change-password', requireLogin, async (req, res) => {
 // service wired up: the resident contacts the office, and staff
 // resets it for them here, then shares the new password directly.
 // ─────────────────────────────────────────────────────────
-router.post('/reset-password', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/reset-password', requireLogin, canWrite, async (req, res) => {
   try {
     const { identifier, newPassword } = req.body;
 

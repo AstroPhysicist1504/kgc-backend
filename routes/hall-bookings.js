@@ -23,7 +23,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -203,7 +203,7 @@ router.post('/', requireLogin, async (req, res) => {
 // The DB partial unique index fires on 'confirmed' if the slot
 // is already taken, returning a 409 with a clear message.
 // ─────────────────────────────────────────────────────────
-router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.patch('/:id/status', requireLogin, canWrite, async (req, res) => {
   try {
     const { id } = req.params;
     const { newStatus, rejectionReason, notes } = req.body;
@@ -276,7 +276,7 @@ router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'
 // Super admin only — for removing test/dummy rows.
 // For real bookings use PATCH to cancel/reject instead.
 // ─────────────────────────────────────────────────────────
-router.delete('/:id', requireLogin, requireRole('super_admin'), async (req, res) => {
+router.delete('/:id', requireLogin, canDelete, async (req, res) => {
   try {
     const result = await pool.query(
       `DELETE FROM hall_bookings WHERE id = $1 RETURNING id`, [req.params.id]

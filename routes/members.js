@@ -7,7 +7,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, requireRole, canDelete, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -65,7 +65,7 @@ router.get('/:id', requireLogin, async (req, res) => {
 });
 
 // POST /api/members  — only committee/admin can add a new resident
-router.post('/', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/', requireLogin, canWrite, async (req, res) => {
   try {
     const {
       fullName, houseNumber, unitType,
@@ -109,7 +109,7 @@ router.post('/', requireLogin, requireRole('super_admin', 'committee'), async (r
 // house number, invalid unit type, etc.), it's skipped and reported —
 // it does NOT stop the rest of the batch from importing. You get back
 // exactly which rows succeeded and which failed, and why.
-router.post('/import', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.post('/import', requireLogin, canWrite, async (req, res) => {
   try {
     const { members } = req.body;
     if (!Array.isArray(members) || members.length === 0) {
@@ -170,7 +170,7 @@ router.post('/import', requireLogin, requireRole('super_admin', 'committee'), as
 });
 
 // PUT /api/members/:id — edit an existing member's profile (committee/admin only)
-router.put('/:id', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.put('/:id', requireLogin, canWrite, async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -217,7 +217,7 @@ router.put('/:id', requireLogin, requireRole('super_admin', 'committee'), async 
 // This is the SAFER way to "remove" someone who has moved out but has
 // existing history (complaints, bills, bookings) — it hides them from
 // active views without breaking that history's link to a real person.
-router.patch('/:id/active', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.patch('/:id/active', requireLogin, canWrite, async (req, res) => {
   try {
     const { id } = req.params;
     const { isActive } = req.body;
@@ -243,7 +243,7 @@ router.patch('/:id/active', requireLogin, requireRole('super_admin', 'committee'
 // complaints, bills, bookings, etc. (by design — that history shouldn't
 // silently vanish). In that case, we return a clear explanation instead
 // of a raw database error, and point toward deactivating instead.
-router.delete('/:id', requireLogin, requireRole('super_admin'), async (req, res) => {
+router.delete('/:id', requireLogin, canDelete, async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(`DELETE FROM members WHERE id = $1 RETURNING id`, [id]);
@@ -272,7 +272,7 @@ router.delete('/:id', requireLogin, requireRole('super_admin'), async (req, res)
 // design. This route deliberately bypasses that protection, so it's more
 // dangerous: everything happens inside one transaction, so if anything
 // fails partway through, nothing is deleted at all (no half-deleted mess).
-router.delete('/:id/force', requireLogin, requireRole('super_admin'), async (req, res) => {
+router.delete('/:id/force', requireLogin, canDelete, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

@@ -10,7 +10,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, requireRole } = require('../middleware/auth');
+const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -139,7 +139,7 @@ router.post('/', requireLogin, async (req, res) => {
 });
 
 // PATCH /api/complaints/:id/status — committee/admin only: move a complaint through its lifecycle
-router.patch('/:id/status', requireLogin, requireRole('super_admin', 'committee'), async (req, res) => {
+router.patch('/:id/status', requireLogin, canWrite, async (req, res) => {
   try {
     const { id } = req.params;
     const { newStatus, note, resolutionNotes, assignedTo } = req.body;
