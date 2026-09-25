@@ -169,6 +169,60 @@ router.post('/import', requireLogin, canWrite, async (req, res) => {
   }
 });
 
+// PATCH /api/members/me — resident self-edit
+// Residents can update only their own contact details.
+// House number, unit type, and ownership type are NOT editable by residents —
+// those are set by the admin and reflect the official record.
+router.patch('/me', requireLogin, async (req, res) => {
+  try {
+    if (!req.user.memberId) {
+      return res.status(404).json({ error: 'No member record linked to your account.' });
+    }
+
+    const {
+      phonePrimary, phoneSecondary, email,
+      vehicle1Reg, vehicle2Reg,
+      emergencyContactName, emergencyContactPhone,
+    } = req.body;
+
+    if (!phonePrimary) {
+      return res.status(400).json({ error: 'Primary phone number is required.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE members SET
+         phone_primary          = $1,
+         phone_secondary        = $2,
+         email                  = $3,
+         vehicle_1_reg          = $4,
+         vehicle_2_reg          = $5,
+         emergency_contact_name  = $6,
+         emergency_contact_phone = $7,
+         updated_at             = NOW()
+       WHERE id = $8
+       RETURNING id, phone_primary, email`,
+      [
+        phonePrimary,
+        phoneSecondary        || null,
+        email                 || null,
+        vehicle1Reg           || null,
+        vehicle2Reg           || null,
+        emergencyContactName  || null,
+        emergencyContactPhone || null,
+        req.user.memberId,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Member record not found.' });
+    }
+    return res.json({ message: 'Your details have been updated.' });
+  } catch (err) {
+    console.error('PATCH /members/me error:', err);
+    return res.status(500).json({ error: 'Could not update your details.' });
+  }
+});
+
 // PUT /api/members/:id — edit an existing member's profile (committee/admin only)
 router.put('/:id', requireLogin, canWrite, async (req, res) => {
   try {
