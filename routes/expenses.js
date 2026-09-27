@@ -244,7 +244,10 @@ router.post('/bulk', requireLogin, canWrite, async (req, res) => {
         const d       = new Date(r.date);
         const yr      = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
         const fy      = `${yr}-${String(yr + 1).slice(2)}`;
-        const mode    = (r.payment_mode || 'cash').toLowerCase().replace(' ', '_');
+        const modeRaw = String(r.payment_mode || 'cash').trim().toLowerCase().replace(/\s+/g,'_');
+        const modeMap = { cheque:'cheque', check:'cheque', upi:'online_upi', neft:'online_neft',
+                          rtgs:'online_rtgs', dd:'demand_draft', imps:'online_neft' };
+        const mode = VALID_PAYMENT_MODES.includes(modeRaw) ? modeRaw : (modeMap[modeRaw] || 'cash');
 
         await pool.query(
           `INSERT INTO society_expenses
