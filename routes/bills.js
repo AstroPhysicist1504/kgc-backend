@@ -318,10 +318,19 @@ router.get('/quarterly-summary', requireLogin, canManage, async (req, res) => {
 // ─────────────────────────────────────────────────────────
 // POST /api/bills/import
 // Bulk-import historical maintenance bills + payments from Excel.
-// Each row must have: house_number, billing_month (YYYY-MM-DD),
-// financial_year, amount_due, amount_paid, payment_date, payment_mode.
-// Maps house_number → member_id automatically.
-// Creates the bill AND a payment record in one transaction per row.
+//
+// Expected columns (from frontend parser):
+//   houseNumber    — matches members.house_number
+//   billingMonth   — YYYY-MM-01 (first of the month)
+//   financialYear  — e.g. "2025-26"
+//   amountDue      — total maintenance due (0 if not provided)
+//   amountPaid     — amount already paid (0 if not provided)
+//   paymentDate    — YYYY-MM-DD (optional)
+//   paymentMode    — cash/cheque/online_upi/online_neft/online_rtgs/demand_draft
+//   billBookNumber — bill book / receipt book number (optional)
+//
+// Each row is processed in its own transaction. Failures are
+// reported row-by-row without stopping the rest of the batch.
 // ─────────────────────────────────────────────────────────
 router.post('/import', requireLogin, canDelete, async (req, res) => {
   try {
@@ -333,6 +342,7 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
       return res.status(400).json({ error: 'Maximum 500 rows per import.' });
     }
 
+    const VALID_MODES = ['cash','cheque','online_upi','online_neft','online_rtgs','demand_draft'];
     const succeeded = [], failed = [];
 
     for (let i = 0; i < bills.length; i++) {
@@ -341,7 +351,7 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
       try {
         await client.query('BEGIN');
 
-        // Resolve member from house_number
+        // Resolve member from house_number (case-insensitive, trimmed)
         const memberRes = await client.query(
           `SELECT id FROM members WHERE LOWER(TRIM(house_number)) = LOWER(TRIM($1))`,
           [r.houseNumber]
@@ -351,7 +361,7 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
         }
         const memberId = memberRes.rows[0].id;
 
-        // Find matching rate for the financial year + unit type
+        // Find matching rate for the financial year + unit type (optional — bill can exist without a rate)
         const rateRes = await client.query(
           `SELECT r.id FROM maintenance_rates r
            JOIN members m ON m.id = $1
@@ -361,15 +371,15 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
         );
         const rateId = rateRes.rows[0]?.id || null;
 
-        const billingMonth = r.billingMonth; // YYYY-MM-DD
-        const amountDue    = parseFloat(r.amountDue)  || 0;
+        const billingMonth = r.billingMonth;               // YYYY-MM-01
+        const amountDue    = parseFloat(r.amountDue)  || 0; // 0 if blank
         const amountPaid   = parseFloat(r.amountPaid) || 0;
-        const balance      = amountDue - amountPaid;
-        const status       = amountPaid <= 0       ? 'unpaid'
-                           : balance <= 0           ? 'paid'
-                           : 'partial';
+        const balance      = Math.max(0, amountDue - amountPaid);
+        const status       = amountPaid <= 0  ? 'unpaid'
+                           : balance   <= 0   ? 'paid'
+                                              : 'partial';
 
-        // Upsert the bill (skip if already exists for this member+month)
+        // Upsert bill — update if already exists for this member+month
         const billRes = await client.query(
           `INSERT INTO maintenance_bills
             (member_id, financial_year, billing_month, rate_id,
@@ -378,10 +388,11 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
            VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,
                    ($3::date + interval '10 days')::date, $9)
            ON CONFLICT (member_id, billing_month) DO UPDATE
-             SET amount_paid   = EXCLUDED.amount_paid,
-                 balance_due   = EXCLUDED.balance_due,
-                 status        = EXCLUDED.status,
-                 updated_at    = NOW()
+             SET total_amount_due = EXCLUDED.total_amount_due,
+                 amount_paid      = EXCLUDED.amount_paid,
+                 balance_due      = EXCLUDED.balance_due,
+                 status           = EXCLUDED.status,
+                 updated_at       = NOW()
            RETURNING id`,
           [memberId, r.financialYear, billingMonth, rateId,
            amountDue, amountPaid, balance, status, req.user.userId]
@@ -389,20 +400,24 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
         const billId = billRes.rows[0].id;
 
         // Record payment if amount paid > 0
-        if (amountPaid > 0 && r.paymentDate) {
-          const mode = (r.paymentMode || 'cash').toLowerCase().trim();
-          const validModes = ['cash','cheque','online_upi','online_neft','online_rtgs','demand_draft'];
-          const payMode = validModes.includes(mode) ? mode : 'cash';
+        if (amountPaid > 0) {
+          const payMode = VALID_MODES.includes(r.paymentMode) ? r.paymentMode : 'cash';
 
           await client.query(
             `INSERT INTO maintenance_payments
               (bill_id, member_id, payment_date, amount_paid,
                amount_towards_principal, balance_outstanding,
-               payment_mode, collected_by, remarks)
-             VALUES ($1,$2,$3,$4,$4,$5,$6::payment_mode,$7,$8)`,
-            [billId, memberId, r.paymentDate, amountPaid,
-             balance, payMode, req.user.userId,
-             r.remarks || 'Imported from historical records']
+               payment_mode, bill_book_number, collected_by, remarks)
+             VALUES ($1,$2,$3,$4,$4,$5,$6::payment_mode,$7,$8,$9)`,
+            [
+              billId, memberId,
+              r.paymentDate || billingMonth,   // use billing month as fallback date
+              amountPaid, balance,
+              payMode,
+              r.billBookNumber || null,
+              req.user.userId,
+              'Imported from historical records',
+            ]
           );
         }
 
