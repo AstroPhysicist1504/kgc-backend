@@ -72,14 +72,23 @@ router.get('/', requireLogin, canManage, async (req, res) => {
 // ─────────────────────────────────────────────────────────
 router.get('/summary', requireLogin, canManage, async (req, res) => {
   try {
-    const now         = new Date();
-    const thisMonth   = now.getMonth() + 1;  // 1-12
-    const thisYear    = now.getFullYear();
+    const now        = new Date();
+    const thisMonth  = now.getMonth() + 1;   // 1–12
+    const thisYear   = now.getFullYear();
 
-    // Total maintenance ever collected (from maintenance_payments)
+    // Indian financial year runs Apr–Mar.
+    // If current month is Jan/Feb/Mar we are still in the FY that started last April.
+    const fyStart    = thisMonth >= 4 ? thisYear     : thisYear - 1; // April of FY start
+    const fyEnd      = thisMonth >= 4 ? thisYear + 1 : thisYear;     // March of FY end
+    const fyLabel    = `${fyStart}-${String(fyEnd).slice(-2)}`;      // e.g. "2025-26"
+
+    // FY date range: 1 Apr fyStart → 31 Mar fyEnd
+    const fyStartDate = `${fyStart}-04-01`;
+    const fyEndDate   = `${fyEnd}-03-31`;
+
+    // Total maintenance ever collected (all time)
     const collectedRes = await pool.query(
-      `SELECT COALESCE(SUM(amount_paid), 0) AS total
-       FROM maintenance_payments`
+      `SELECT COALESCE(SUM(amount_paid), 0) AS total FROM maintenance_payments`
     );
 
     // Expenses this calendar month
@@ -91,35 +100,38 @@ router.get('/summary', requireLogin, canManage, async (req, res) => {
       [thisYear, thisMonth]
     );
 
-    // Expenses this calendar year
+    // Expenses this financial year (Apr–Mar)
     const yearExpRes = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) AS total
        FROM society_expenses
-       WHERE EXTRACT(YEAR FROM expense_date) = $1`,
-      [thisYear]
+       WHERE expense_date BETWEEN $1 AND $2`,
+      [fyStartDate, fyEndDate]
     );
 
-    // Maintenance collected this year (for surplus calc)
+    // Maintenance collected this financial year (for surplus calc)
     const collectedYearRes = await pool.query(
       `SELECT COALESCE(SUM(amount_paid), 0) AS total
        FROM maintenance_payments
-       WHERE EXTRACT(YEAR FROM payment_date) = $1`,
-      [thisYear]
+       WHERE payment_date BETWEEN $1 AND $2`,
+      [fyStartDate, fyEndDate]
     );
 
-    const totalCollected  = parseFloat(collectedRes.rows[0].total);
-    const monthExpenses   = parseFloat(monthExpRes.rows[0].total);
-    const yearExpenses    = parseFloat(yearExpRes.rows[0].total);
-    const yearCollected   = parseFloat(collectedYearRes.rows[0].total);
-    const netSurplus      = yearCollected - yearExpenses;
+    const totalCollected = parseFloat(collectedRes.rows[0].total);
+    const monthExpenses  = parseFloat(monthExpRes.rows[0].total);
+    const yearExpenses   = parseFloat(yearExpRes.rows[0].total);
+    const yearCollected  = parseFloat(collectedYearRes.rows[0].total);
+    const netSurplus     = yearCollected - yearExpenses;
 
     return res.json({
       totalCollected,
       monthExpenses,
       yearExpenses,
       netSurplus,
-      month: thisMonth,
-      year:  thisYear,
+      month:   thisMonth,
+      year:    thisYear,
+      fyLabel,              // e.g. "2025-26"
+      fyStart,              // e.g. 2025
+      fyEnd,                // e.g. 2026
     });
   } catch (err) {
     console.error('GET /expenses/summary error:', err);
