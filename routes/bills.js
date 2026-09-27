@@ -11,7 +11,7 @@
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const pool = require('../db/pool');
-const { requireLogin, canWrite, canManage } = require('../middleware/auth');
+const { requireLogin, canWrite, canManage, canDelete } = require('../middleware/auth');
 const STAFF_ROLES = ['super_admin','president','secretary','treasurer','manager','committee'];
 
 const router = express.Router();
