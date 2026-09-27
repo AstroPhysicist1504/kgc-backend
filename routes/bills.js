@@ -314,3 +314,155 @@ router.get('/quarterly-summary', requireLogin, canManage, async (req, res) => {
     return res.status(500).json({ error: 'Could not load quarterly summary.' });
   }
 });
+
+// ─────────────────────────────────────────────────────────
+// POST /api/bills/import
+// Bulk-import historical maintenance bills + payments from Excel.
+// Each row must have: house_number, billing_month (YYYY-MM-DD),
+// financial_year, amount_due, amount_paid, payment_date, payment_mode.
+// Maps house_number → member_id automatically.
+// Creates the bill AND a payment record in one transaction per row.
+// ─────────────────────────────────────────────────────────
+router.post('/import', requireLogin, canDelete, async (req, res) => {
+  try {
+    const { bills } = req.body;
+    if (!Array.isArray(bills) || bills.length === 0) {
+      return res.status(400).json({ error: 'No rows provided.' });
+    }
+    if (bills.length > 500) {
+      return res.status(400).json({ error: 'Maximum 500 rows per import.' });
+    }
+
+    const succeeded = [], failed = [];
+
+    for (let i = 0; i < bills.length; i++) {
+      const r = bills[i];
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        // Resolve member from house_number
+        const memberRes = await client.query(
+          `SELECT id FROM members WHERE LOWER(TRIM(house_number)) = LOWER(TRIM($1))`,
+          [r.houseNumber]
+        );
+        if (memberRes.rows.length === 0) {
+          throw new Error(`No member found with house number "${r.houseNumber}"`);
+        }
+        const memberId = memberRes.rows[0].id;
+
+        // Find matching rate for the financial year + unit type
+        const rateRes = await client.query(
+          `SELECT r.id FROM maintenance_rates r
+           JOIN members m ON m.id = $1
+           WHERE r.financial_year = $2 AND r.unit_type = m.unit_type
+           LIMIT 1`,
+          [memberId, r.financialYear]
+        );
+        const rateId = rateRes.rows[0]?.id || null;
+
+        const billingMonth = r.billingMonth; // YYYY-MM-DD
+        const amountDue    = parseFloat(r.amountDue)  || 0;
+        const amountPaid   = parseFloat(r.amountPaid) || 0;
+        const balance      = amountDue - amountPaid;
+        const status       = amountPaid <= 0       ? 'unpaid'
+                           : balance <= 0           ? 'paid'
+                           : 'partial';
+
+        // Upsert the bill (skip if already exists for this member+month)
+        const billRes = await client.query(
+          `INSERT INTO maintenance_bills
+            (member_id, financial_year, billing_month, rate_id,
+             bill_amount, total_amount_due, amount_paid, balance_due,
+             status, due_date, generated_by)
+           VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,
+                   ($3::date + interval '10 days')::date, $9)
+           ON CONFLICT (member_id, billing_month) DO UPDATE
+             SET amount_paid   = EXCLUDED.amount_paid,
+                 balance_due   = EXCLUDED.balance_due,
+                 status        = EXCLUDED.status,
+                 updated_at    = NOW()
+           RETURNING id`,
+          [memberId, r.financialYear, billingMonth, rateId,
+           amountDue, amountPaid, balance, status, req.user.userId]
+        );
+        const billId = billRes.rows[0].id;
+
+        // Record payment if amount paid > 0
+        if (amountPaid > 0 && r.paymentDate) {
+          const mode = (r.paymentMode || 'cash').toLowerCase().trim();
+          const validModes = ['cash','cheque','online_upi','online_neft','online_rtgs','demand_draft'];
+          const payMode = validModes.includes(mode) ? mode : 'cash';
+
+          await client.query(
+            `INSERT INTO maintenance_payments
+              (bill_id, member_id, payment_date, amount_paid,
+               amount_towards_principal, balance_outstanding,
+               payment_mode, collected_by, remarks)
+             VALUES ($1,$2,$3,$4,$4,$5,$6::payment_mode,$7,$8)`,
+            [billId, memberId, r.paymentDate, amountPaid,
+             balance, payMode, req.user.userId,
+             r.remarks || 'Imported from historical records']
+          );
+        }
+
+        await client.query('COMMIT');
+        succeeded.push(r.houseNumber);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        failed.push({ row: r.houseNumber || `Row ${i + 1}`, error: err.message });
+      } finally {
+        client.release();
+      }
+    }
+
+    return res.json({
+      successCount: succeeded.length,
+      failedCount:  failed.length,
+      totalRows:    bills.length,
+      failed,
+    });
+  } catch (err) {
+    console.error('POST /bills/import error:', err);
+    return res.status(500).json({ error: 'Import failed.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// PATCH /api/bills/:id — edit a bill's amount or status
+// Restricted to canDelete roles (admin, president, secretary, treasurer)
+// ─────────────────────────────────────────────────────────
+router.patch('/:id', requireLogin, canDelete, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { totalAmountDue, amountPaid, status, remarks } = req.body;
+
+    const current = await pool.query(
+      `SELECT * FROM maintenance_bills WHERE id = $1`, [id]
+    );
+    if (current.rows.length === 0) {
+      return res.status(404).json({ error: 'Bill not found.' });
+    }
+
+    const due   = totalAmountDue !== undefined ? parseFloat(totalAmountDue) : parseFloat(current.rows[0].total_amount_due);
+    const paid  = amountPaid     !== undefined ? parseFloat(amountPaid)     : parseFloat(current.rows[0].amount_paid);
+    const bal   = due - paid;
+    const newStatus = status || (paid <= 0 ? 'unpaid' : bal <= 0 ? 'paid' : 'partial');
+
+    await pool.query(
+      `UPDATE maintenance_bills SET
+         total_amount_due = $1,
+         amount_paid      = $2,
+         balance_due      = $3,
+         status           = $4,
+         updated_at       = NOW()
+       WHERE id = $5`,
+      [due, paid, bal, newStatus, id]
+    );
+
+    return res.json({ message: 'Bill updated.' });
+  } catch (err) {
+    console.error('PATCH /bills/:id error:', err);
+    return res.status(500).json({ error: `Could not update bill: ${err.message}` });
+  }
+});
