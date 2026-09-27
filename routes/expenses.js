@@ -282,6 +282,70 @@ router.post('/bulk', requireLogin, canWrite, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────
+// PATCH /api/expenses/:id — edit an existing expense record
+// Restricted to canDelete roles (admin, president, secretary, treasurer)
+// ─────────────────────────────────────────────────────────
+router.patch('/:id', requireLogin, canDelete, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      expenseDate, category, description,
+      vendorName, vendorGstNumber,
+      amount, gstAmount, paymentMode, invoiceNumber,
+    } = req.body;
+
+    const current = await pool.query(
+      `SELECT * FROM society_expenses WHERE id = $1`, [id]
+    );
+    if (current.rows.length === 0) {
+      return res.status(404).json({ error: 'Expense not found.' });
+    }
+
+    const e = current.rows[0];
+    const newAmt     = amount      !== undefined ? parseFloat(amount)    : parseFloat(e.amount);
+    const newGst     = gstAmount   !== undefined ? parseFloat(gstAmount) : parseFloat(e.gst_amount || 0);
+    const newBase    = newAmt - newGst;
+    const newMode    = paymentMode || e.payment_mode;
+
+    if (!VALID_PAYMENT_MODES.includes(newMode)) {
+      return res.status(400).json({ error: 'Invalid payment method.' });
+    }
+
+    await pool.query(
+      `UPDATE society_expenses SET
+         expense_date       = COALESCE($1, expense_date),
+         category           = COALESCE($2, category),
+         description        = COALESCE($3, description),
+         vendor_name        = COALESCE($4, vendor_name),
+         vendor_gst_number  = $5,
+         amount             = $6,
+         gst_amount         = $7,
+         amount_excluding_gst = $8,
+         payment_mode       = $9::expense_payment_mode,
+         invoice_number     = $10,
+         updated_at         = NOW()
+       WHERE id = $11`,
+      [
+        expenseDate   || null,
+        category      || null,
+        description   || null,
+        vendorName    || null,
+        vendorGstNumber !== undefined ? (vendorGstNumber || null) : e.vendor_gst_number,
+        newAmt, newGst, newBase,
+        newMode,
+        invoiceNumber !== undefined ? (invoiceNumber || null) : e.invoice_number,
+        id,
+      ]
+    );
+
+    return res.json({ message: 'Expense updated.' });
+  } catch (err) {
+    console.error('PATCH /expenses/:id error:', err);
+    return res.status(500).json({ error: `Could not update expense: ${err.message}` });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
 // DELETE /api/expenses/:id
 // Super admin only — hard delete a recorded expense.
 // ─────────────────────────────────────────────────────────
