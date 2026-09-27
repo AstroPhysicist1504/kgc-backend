@@ -259,3 +259,58 @@ router.post('/:id/payments', requireLogin, canWrite, async (req, res) => {
 });
 
 module.exports = router;
+
+// ─────────────────────────────────────────────────────────
+// GET /api/bills/quarterly-summary
+// Returns maintenance collected and expenses per quarter
+// for a given calendar year (defaults to current year).
+// Quarters follow the calendar year (Jan-Mar, Apr-Jun, etc.)
+// Query param: ?year=2026
+// ─────────────────────────────────────────────────────────
+router.get('/quarterly-summary', requireLogin, canManage, async (req, res) => {
+  try {
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+
+    // Maintenance collected per quarter (from payments)
+    const collectedRes = await pool.query(`
+      SELECT
+        EXTRACT(QUARTER FROM payment_date)::int AS quarter,
+        COALESCE(SUM(amount_paid), 0)           AS collected
+      FROM maintenance_payments
+      WHERE EXTRACT(YEAR FROM payment_date) = $1
+      GROUP BY quarter
+      ORDER BY quarter
+    `, [year]);
+
+    // Expenses per quarter (from society_expenses)
+    const expensesRes = await pool.query(`
+      SELECT
+        EXTRACT(QUARTER FROM expense_date)::int AS quarter,
+        COALESCE(SUM(amount), 0)                AS expenses
+      FROM society_expenses
+      WHERE EXTRACT(YEAR FROM expense_date) = $1
+      GROUP BY quarter
+      ORDER BY quarter
+    `, [year]);
+
+    // Merge into 4 quarters
+    const quarters = [1, 2, 3, 4].map(q => {
+      const col = collectedRes.rows.find(r => r.quarter === q);
+      const exp = expensesRes.rows.find(r => r.quarter === q);
+      const collected = parseFloat(col?.collected || 0);
+      const expenses  = parseFloat(exp?.expenses  || 0);
+      return {
+        quarter:   q,
+        label:     ['Q1 (Jan–Mar)', 'Q2 (Apr–Jun)', 'Q3 (Jul–Sep)', 'Q4 (Oct–Dec)'][q - 1],
+        collected,
+        expenses,
+        surplus:   collected - expenses,
+      };
+    });
+
+    return res.json({ year, quarters });
+  } catch (err) {
+    console.error('GET /bills/quarterly-summary error:', err);
+    return res.status(500).json({ error: 'Could not load quarterly summary.' });
+  }
+});
