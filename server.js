@@ -9,6 +9,7 @@ const billRoutes = require('./routes/bills');
 const noticeRoutes = require('./routes/notices');
 const hallBookingRoutes = require('./routes/hall-bookings');
 const expenseRoutes     = require('./routes/expenses');
+const ledgerRoutes      = require('./routes/ledger');
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use('/api/bills', billRoutes);
 app.use('/api/notices', noticeRoutes);
 app.use('/api/hall-bookings', hallBookingRoutes);
 app.use('/api/expenses',     expenseRoutes);
+app.use('/api/ledger',       ledgerRoutes);
 
 // Catch-all error handler — never leak raw error details to the client
 app.use((err, req, res, next) => {
