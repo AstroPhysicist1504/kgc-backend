@@ -43,13 +43,40 @@ router.get('/', requireLogin, canManage, async (req, res) => {
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
+    // The owner name is always mapped from the current members list (via house
+    // number), so renaming a member updates the ledger automatically. A running
+    // per-house, per-FY total drives the "previous dues" remark: once a house's
+    // cumulative payments in a financial year exceed the ₹16,000 annual
+    // maintenance, the row that tips it over (and any after) is flagged.
+    const ANNUAL_MAINTENANCE = 16000;
     const result = await pool.query(
-      `SELECT id, payment_date, payer_name, house_number, description,
-              amount, payment_mode, bill_book_number, receipt_number,
-              financial_year, created_at
-       FROM payment_ledger
+      `WITH enriched AS (
+         SELECT pl.*,
+                SUM(pl.amount) OVER (
+                  PARTITION BY UPPER(TRIM(COALESCE(pl.house_number,''))), pl.financial_year
+                  ORDER BY pl.payment_date, pl.created_at, pl.id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS cum_amount
+         FROM payment_ledger pl
+       )
+       SELECT e.id, e.payment_date,
+              COALESCE(m.full_name, e.payer_name) AS payer_name,
+              e.house_number, e.description,
+              e.amount, e.payment_mode, e.bill_book_number, e.receipt_number,
+              e.financial_year, e.created_at,
+              e.cum_amount,
+              m.id AS member_id,
+              CASE
+                WHEN NULLIF(TRIM(COALESCE(e.house_number,'')),'') IS NOT NULL
+                     AND e.cum_amount > ${ANNUAL_MAINTENANCE}
+                THEN 'Payment of previous dues'
+                ELSE ''
+              END AS remark
+       FROM enriched e
+       LEFT JOIN members m
+         ON UPPER(TRIM(m.house_number)) = UPPER(TRIM(e.house_number))
        ${where}
-       ORDER BY payment_date DESC, receipt_number DESC`,
+       ORDER BY e.payment_date DESC, e.receipt_number DESC`,
       params
     );
     return res.json(result.rows);
@@ -118,8 +145,22 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
       amount, paymentMode, billBookNumber, receiptNumber,
     } = req.body;
 
-    if (!paymentDate || !payerName || !amount) {
-      return res.status(400).json({ error: 'Date, payer name, and amount are required.' });
+    if (!paymentDate || !houseNumber || amount === undefined || amount === null || amount === '') {
+      return res.status(400).json({ error: 'Date, house number, and amount are required.' });
+    }
+
+    // The owner name comes from the members list, keyed on house number.
+    let ownerName = (payerName || '').trim();
+    const look = await pool.query(
+      `SELECT full_name FROM members
+       WHERE UPPER(TRIM(house_number)) = UPPER(TRIM($1)) LIMIT 1`,
+      [houseNumber]
+    );
+    if (look.rows.length) ownerName = look.rows[0].full_name;
+    if (!ownerName) {
+      return res.status(404).json({
+        error: `No member found for house number "${houseNumber}". Add the member first, or check the house number.`,
+      });
     }
 
     const d  = new Date(paymentDate);
@@ -133,7 +174,7 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
          financial_year, recorded_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING id`,
-      [paymentDate, payerName, houseNumber || null,
+      [paymentDate, ownerName, houseNumber.trim(),
        description || 'Maintenance', parseFloat(amount),
        normMode(paymentMode), billBookNumber || null,
        receiptNumber || null, financialYear, req.user.userId]
@@ -214,6 +255,26 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
     const cur = await pool.query(`SELECT * FROM payment_ledger WHERE id = $1`, [id]);
     if (cur.rows.length === 0) return res.status(404).json({ error: 'Entry not found.' });
 
+    // Keep the owner name mapped from the members list when a house number is given.
+    let derivedName = payerName || null;
+    if (houseNumber) {
+      const look = await pool.query(
+        `SELECT full_name FROM members
+         WHERE UPPER(TRIM(house_number)) = UPPER(TRIM($1)) LIMIT 1`,
+        [houseNumber]
+      );
+      if (look.rows.length) derivedName = look.rows[0].full_name;
+    }
+
+    // Recompute the financial year if the payment date moved across an FY edge,
+    // so the "previous dues" running total stays grouped correctly.
+    let financialYear = null;
+    if (paymentDate) {
+      const d  = new Date(paymentDate);
+      const fy = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+      financialYear = `${fy}-${String(fy + 1).slice(-2)}`;
+    }
+
     await pool.query(
       `UPDATE payment_ledger SET
          payment_date     = COALESCE($1, payment_date),
@@ -224,12 +285,13 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
          payment_mode     = COALESCE($6, payment_mode),
          bill_book_number = $7,
          receipt_number   = $8,
+         financial_year   = COALESCE($9, financial_year),
          updated_at       = NOW()
-       WHERE id = $9`,
-      [paymentDate || null, payerName || null, houseNumber || null,
+       WHERE id = $10`,
+      [paymentDate || null, derivedName, houseNumber || null,
        description || null, amount !== undefined ? parseFloat(amount) : null,
        paymentMode ? normMode(paymentMode) : null,
-       billBookNumber || null, receiptNumber || null, id]
+       billBookNumber || null, receiptNumber || null, financialYear, id]
     );
     return res.json({ message: 'Entry updated.' });
   } catch (err) {
