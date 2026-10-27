@@ -12,6 +12,22 @@ const router = express.Router();
 
 const VALID_MODES = ['cash','cheque','online','online_upi','online_neft','online_rtgs','demand_draft'];
 
+// Canonical house-number key as a SQL expression, mirroring houseKey() in the
+// frontend: ignores case, spaces, hyphens/dots and leading zeros, and collapses
+// block names to abbreviations (Kingston=K, Regal=R, Row House=RH).
+// "Kingston - 05", "K-5" and "k 05" all become K5.
+function houseKeySql(col) {
+  return `regexp_replace(
+            regexp_replace(
+              regexp_replace(
+                regexp_replace(
+                  regexp_replace(UPPER(COALESCE(${col}, '')), '[^A-Z0-9]', '', 'g'),
+                  '^KINGSTON', 'K'),
+                '^REGAL', 'R'),
+              '^ROWHOUSE', 'RH'),
+            '([A-Z])0+([0-9])', '\\1\\2', 'g')`;
+}
+
 // Normalise the free-form payment mode from the ledger
 function normMode(val) {
   const v = String(val || '').trim().toLowerCase().replace(/\s+/g, '_');
@@ -46,14 +62,16 @@ router.get('/', requireLogin, canManage, async (req, res) => {
     // The owner name is always mapped from the current members list (via house
     // number), so renaming a member updates the ledger automatically. A running
     // per-house, per-FY total drives the "previous dues" remark: once a house's
-    // cumulative payments in a financial year exceed the ₹16,000 annual
-    // maintenance, the row that tips it over (and any after) is flagged.
-    const ANNUAL_MAINTENANCE = 16000;
+    // cumulative payments in a financial year exceed the annual maintenance for
+    // its unit type, the row that tips it over (and any after) is flagged.
+    // Homes pay ₹4,000/quarter (₹16,000/yr); shops pay ₹750/quarter (₹3,000/yr).
+    const ANNUAL_MAINTENANCE_HOME = 16000;
+    const ANNUAL_MAINTENANCE_SHOP = 3000;
     const result = await pool.query(
       `WITH enriched AS (
          SELECT pl.*,
                 SUM(pl.amount) OVER (
-                  PARTITION BY UPPER(TRIM(COALESCE(pl.house_number,''))), pl.financial_year
+                  PARTITION BY ${houseKeySql('pl.house_number')}, pl.financial_year
                   ORDER BY pl.payment_date, pl.created_at, pl.id
                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                 ) AS cum_amount
@@ -68,13 +86,15 @@ router.get('/', requireLogin, canManage, async (req, res) => {
               m.id AS member_id,
               CASE
                 WHEN NULLIF(TRIM(COALESCE(e.house_number,'')),'') IS NOT NULL
-                     AND e.cum_amount > ${ANNUAL_MAINTENANCE}
+                     AND e.cum_amount > (CASE WHEN m.unit_type::text = 'shop'
+                                         THEN ${ANNUAL_MAINTENANCE_SHOP}
+                                         ELSE ${ANNUAL_MAINTENANCE_HOME} END)
                 THEN 'Payment of previous dues'
                 ELSE ''
               END AS remark
        FROM enriched e
        LEFT JOIN members m
-         ON UPPER(TRIM(m.house_number)) = UPPER(TRIM(e.house_number))
+         ON ${houseKeySql('m.house_number')} = ${houseKeySql('e.house_number')}
        ${where}
        ORDER BY e.payment_date DESC, e.receipt_number DESC`,
       params
@@ -152,11 +172,15 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
     // The owner name comes from the members list, keyed on house number.
     let ownerName = (payerName || '').trim();
     const look = await pool.query(
-      `SELECT full_name FROM members
-       WHERE UPPER(TRIM(house_number)) = UPPER(TRIM($1)) LIMIT 1`,
+      `SELECT full_name, house_number FROM members
+       WHERE ${houseKeySql('house_number')} = ${houseKeySql('$1::text')} LIMIT 1`,
       [houseNumber]
     );
-    if (look.rows.length) ownerName = look.rows[0].full_name;
+    let canonicalHouse = houseNumber.trim();
+    if (look.rows.length) {
+      ownerName      = look.rows[0].full_name;
+      canonicalHouse = look.rows[0].house_number;   // store as in the members list
+    }
     if (!ownerName) {
       return res.status(404).json({
         error: `No member found for house number "${houseNumber}". Add the member first, or check the house number.`,
@@ -174,7 +198,7 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
          financial_year, recorded_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING id`,
-      [paymentDate, ownerName, houseNumber.trim(),
+      [paymentDate, ownerName, canonicalHouse,
        description || 'Maintenance', parseFloat(amount),
        normMode(paymentMode), billBookNumber || null,
        receiptNumber || null, financialYear, req.user.userId]
@@ -257,13 +281,17 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
 
     // Keep the owner name mapped from the members list when a house number is given.
     let derivedName = payerName || null;
+    let canonicalHouse = houseNumber || null;
     if (houseNumber) {
       const look = await pool.query(
-        `SELECT full_name FROM members
-         WHERE UPPER(TRIM(house_number)) = UPPER(TRIM($1)) LIMIT 1`,
+        `SELECT full_name, house_number FROM members
+         WHERE ${houseKeySql('house_number')} = ${houseKeySql('$1::text')} LIMIT 1`,
         [houseNumber]
       );
-      if (look.rows.length) derivedName = look.rows[0].full_name;
+      if (look.rows.length) {
+        derivedName    = look.rows[0].full_name;
+        canonicalHouse = look.rows[0].house_number;
+      }
     }
 
     // Recompute the financial year if the payment date moved across an FY edge,
@@ -288,7 +316,7 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
          financial_year   = COALESCE($9, financial_year),
          updated_at       = NOW()
        WHERE id = $10`,
-      [paymentDate || null, derivedName, houseNumber || null,
+      [paymentDate || null, derivedName, canonicalHouse,
        description || null, amount !== undefined ? parseFloat(amount) : null,
        paymentMode ? normMode(paymentMode) : null,
        billBookNumber || null, receiptNumber || null, financialYear, id]
