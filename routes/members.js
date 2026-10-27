@@ -131,8 +131,8 @@ router.post('/import', requireLogin, canWrite, async (req, res) => {
         if (!row.fullName || !row.houseNumber || !row.unitType || !row.phonePrimary) {
           throw new Error('Missing a required field (name, house number, unit type, or phone).');
         }
-        if (!['2bhk', '3bhk', 'rowhouse'].includes(row.unitType)) {
-          throw new Error(`Invalid unit type "${row.unitType}" — must be 2bhk, 3bhk, or rowhouse.`);
+        if (!['2bhk', '3bhk', 'rowhouse', 'shop'].includes(row.unitType)) {
+          throw new Error(`Invalid unit type "${row.unitType}" — must be 2bhk, 3bhk, rowhouse, or shop.`);
         }
 
         await pool.query(
