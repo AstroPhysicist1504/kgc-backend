@@ -10,6 +10,8 @@ const express = require('express');
 const pool    = require('../db/pool');
 const { requireLogin, canDelete, canWrite, canManage } = require('../middleware/auth');
 
+const receivablesRoute = require('./receivables');
+
 const router = express.Router();
 
 const VALID_PAYMENT_MODES = [
@@ -86,9 +88,10 @@ router.get('/summary', requireLogin, canManage, async (req, res) => {
     const fyStartDate = `${fyStart}-04-01`;
     const fyEndDate   = `${fyEnd}-03-31`;
 
-    // Total maintenance ever collected (all time)
+    // Total maintenance ever collected (all time) — from the maintenance
+    // payment ledger, i.e. the same records behind the "Monthly Collections" cards.
     const collectedRes = await pool.query(
-      `SELECT COALESCE(SUM(amount_paid), 0) AS total FROM maintenance_payments`
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM payment_ledger`
     );
 
     // Expenses this calendar month
@@ -108,11 +111,24 @@ router.get('/summary', requireLogin, canManage, async (req, res) => {
       [fyStartDate, fyEndDate]
     );
 
-    // Maintenance collected this financial year (for surplus calc)
+    // Maintenance collected this financial year (equals the FY total of Monthly Collections)
     const collectedYearRes = await pool.query(
-      `SELECT COALESCE(SUM(amount_paid), 0) AS total
-       FROM maintenance_payments
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM payment_ledger
        WHERE payment_date BETWEEN $1 AND $2`,
+      [fyStartDate, fyEndDate]
+    );
+
+    // Other receivables (non-maintenance income) — month and financial year
+    await receivablesRoute.schemaReady;
+    const recMonthRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM society_receivables
+       WHERE EXTRACT(YEAR FROM receipt_date) = $1 AND EXTRACT(MONTH FROM receipt_date) = $2`,
+      [thisYear, thisMonth]
+    );
+    const recYearRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM society_receivables
+       WHERE receipt_date BETWEEN $1 AND $2`,
       [fyStartDate, fyEndDate]
     );
 
@@ -120,10 +136,15 @@ router.get('/summary', requireLogin, canManage, async (req, res) => {
     const monthExpenses  = parseFloat(monthExpRes.rows[0].total);
     const yearExpenses   = parseFloat(yearExpRes.rows[0].total);
     const yearCollected  = parseFloat(collectedYearRes.rows[0].total);
-    const netSurplus     = yearCollected - yearExpenses;
+    const monthReceivables = parseFloat(recMonthRes.rows[0].total);
+    const yearReceivables  = parseFloat(recYearRes.rows[0].total);
+    const netSurplus     = yearCollected + yearReceivables - yearExpenses;
 
     return res.json({
       totalCollected,
+      yearCollected,
+      monthReceivables,
+      yearReceivables,
       monthExpenses,
       yearExpenses,
       netSurplus,
