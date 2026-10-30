@@ -11,6 +11,7 @@ const hallBookingRoutes = require('./routes/hall-bookings');
 const expenseRoutes     = require('./routes/expenses');
 const ledgerRoutes      = require('./routes/ledger');
 const duesRoutes        = require('./routes/dues');
+const receivableRoutes  = require('./routes/receivables');
 
 const app = express();
 
@@ -41,6 +42,8 @@ app.use('/api/hall-bookings', hallBookingRoutes);
 app.use('/api/expenses',     expenseRoutes);
 app.use('/api/ledger',       ledgerRoutes);
 app.use('/api/dues',         duesRoutes);
+app.use('/api/receivables',  receivableRoutes);
+app.use('/api/transfers',    require('./routes/transfers'));
 
 // Catch-all error handler — never leak raw error details to the client
 app.use((err, req, res, next) => {

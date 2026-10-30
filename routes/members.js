@@ -288,6 +288,9 @@ router.patch('/:id/active', requireLogin, canWrite, async (req, res) => {
     }
     return res.json({ message: isActive ? 'Member reactivated.' : 'Member marked inactive.' });
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Another owner is already active for this house. Only one owner per house can be active.' });
+    }
     console.error('PATCH /members/:id/active error:', err);
     return res.status(500).json({ error: 'Could not update member status.' });
   }

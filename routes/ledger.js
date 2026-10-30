@@ -12,10 +12,6 @@ const router = express.Router();
 
 const VALID_MODES = ['cash','cheque','online','online_upi','online_neft','online_rtgs','demand_draft'];
 
-// Maintenance per quarter by unit type (Rs.). Homes 4,000; shops 750.
-const QUARTER_FEE_HOME = 4000;
-const QUARTER_FEE_SHOP = 750;
-
 // Each payment records how long it covers: start_quarter (1-4, within the financial
 // year of the payment date) and quarters_covered (1-4; 4 = complete financial year).
 // Older / imported rows have NULL here and are only checked against the yearly total.
@@ -24,12 +20,31 @@ async function ensureSchema() {
   await pool.query(`
     ALTER TABLE payment_ledger
       ADD COLUMN IF NOT EXISTS start_quarter    SMALLINT,
-      ADD COLUMN IF NOT EXISTS quarters_covered SMALLINT
+      ADD COLUMN IF NOT EXISTS quarters_covered SMALLINT,
+      ADD COLUMN IF NOT EXISTS remark           TEXT
   `);
 }
 const schemaReady = ensureSchema().catch(err =>
   console.error('ledger: schema setup error (run add_payment_duration.sql manually):', err)
 );
+
+// Runs once after the schema is ready: links existing payments to residents.
+schemaReady.then(() => mapLedgerToMembers()).then(r =>
+  console.log(`ledger: linked ${r.linkedByHouse} by house, ${r.linkedByName} by name; ${r.unmapped.length} still unlinked`)
+).catch(err => console.error('ledger: resident mapping error:', err.message));
+
+// Maintenance per quarter by unit type (Rs.). Homes 4,000; shops 750.
+const QUARTER_FEE_HOME = 4000;
+const QUARTER_FEE_SHOP = 750;
+
+// A remark typed or chosen by the recorder: trimmed, max 200 characters.
+//   not sent at all  -> NULL  ("never set": older rows; the amount rule below applies)
+//   sent but blank   -> ''    (the recorder chose "No remark": stays blank)
+function cleanRemark(v) {
+  if (v === undefined) return null;
+  if (v === null) return '';
+  return String(v).trim().slice(0, 200);
+}
 
 // Financial quarter of a YYYY-MM-DD date: Apr-Jun=1, Jul-Sep=2, Oct-Dec=3, Jan-Mar=4.
 function quarterOfDate(isoDate) {
@@ -72,6 +87,127 @@ function houseKeySql(col) {
                 '^REGAL', 'R'),
               '^ROWHOUSE', 'RH'),
             '([A-Z])0+([0-9])', '\\1\\2', 'g')`;
+}
+
+
+// ─────────────────────────────────────────────────────────
+// Mapping payments to residents (payment_ledger.member_id)
+// ─────────────────────────────────────────────────────────
+// The register writes house numbers its own way (R.H.-15, K-05, A1-26, Shop No.3,
+// "RH 15") while the residents list uses block names (Royale - 15, Kingston - 05,
+// A1 - 26, Shop No. 3). Both are reduced to {family, number}. Within a family the
+// number is unique (row-house numbers never repeat across Antilia / Empress /
+// Royale, and A1 = 1-32, A2 = 33-64), so a number identifies one house.
+const FAMILIES = [
+  ['KINGSTON','K'], ['REGAL','R'], ['ANTILIA','RH'], ['ANTILLIA','RH'], ['EMPRESS','RH'],
+  ['ROYALE','RH'], ['ROWHOUSE','RH'], ['SHOPNO','S'], ['SHOP','S'],
+  ['RH','RH'], ['K','K'], ['R','R'], ['A1','A'], ['A2','A'], ['A','A'],
+];
+function famNum(house) {
+  const t = String(house || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // Ṛ -> R
+    .toUpperCase().replace(/[^A-Z0-9]/g, '');
+  for (const [prefix, fam] of FAMILIES) {
+    if (t.startsWith(prefix)) {
+      const m = t.slice(prefix.length).match(/^0*(\d+)$/);
+      if (m) return fam + ':' + parseInt(m[1], 10);
+    }
+  }
+  return null;
+}
+
+function buildMemberIndex(members) {
+  // 'RH:15' -> member, or null if two members share it. After a sale a house has an
+  // inactive previous owner and an active new one: the active owner is used.
+  const byHouse = new Map();
+    const groups = new Map();
+  for (const m of members) {
+    const k = famNum(m.house_number);
+    if (!k) continue;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(m);
+  }
+  for (const [k, list] of groups) {
+    const active = list.filter(m => m.is_active !== false);
+    const use = active.length ? active : list;
+    byHouse.set(k, use.length === 1 ? use[0] : null);
+  }
+  return { members, byHouse };
+}
+
+// Strict, spelling-tolerant name comparison (used only for rows with no house number).
+const NAME_NOISE = new Set(['mr','mrs','ms','smt','shri','shree','sri','dr','late','lt','ku','kumari',
+  's','o','d','w','c','of','and','sh','sd','wd','sio','dio','wio']);
+function nameTokens(n) {
+  return String(n || '').toLowerCase().replace(/s\/o|d\/o|w\/o|c\/o/g, ' ')
+    .split(/[^a-z]+/).filter(w => w.length > 1 && !NAME_NOISE.has(w));
+}
+function lev(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return dp[a.length][b.length];
+}
+function tokenSim(a, b) { return 1 - lev(a, b) / Math.max(a.length, b.length); }
+// Share of the payer's name words found (allowing spelling slips) in the resident's name.
+function nameScore(payer, resident) {
+  const P = nameTokens(payer), R = nameTokens(resident);
+  if (P.length < 2 || !R.length) return 0;        // a single word is never enough
+  let hit = 0;
+  for (const p of P) if (R.some(r => tokenSim(p, r) >= 0.8)) hit++;
+  return hit / P.length;
+}
+function matchByName(payer, idx) {
+  const scored = idx.members.map(m => ({ m, s: nameScore(payer, m.full_name) }))
+    .filter(x => x.s >= 1).sort((a, b) => b.s - a.s);
+  return scored.length === 1 ? scored[0].m : null; // exactly one resident fits
+}
+
+// Finds the resident for a payment: by house number first; by name only if there is
+// no house number. Returns { member, how } or { member: null, why }.
+function resolveResident(houseNumber, payerName, idx, { useNames = true } = {}) {
+  const hasHouse = String(houseNumber || '').trim() !== '';
+  if (hasHouse) {
+    const k = famNum(houseNumber);
+    if (!k) return { member: null, why: 'House number not understood' };
+    if (!idx.byHouse.has(k)) return { member: null, why: 'House number not in residents list' };
+    const m = idx.byHouse.get(k);
+    return m ? { member: m, how: 'house' } : { member: null, why: 'More than one resident has this house number' };
+  }
+  if (!useNames) return { member: null, why: 'No house number' };
+  const m = matchByName(payerName, idx);
+  return m ? { member: m, how: 'name' } : { member: null, why: 'No house number, and no single resident matches the name' };
+}
+
+async function loadIndex(client = pool) {
+  const r = await client.query(`SELECT id, full_name, house_number, is_active FROM members`);
+  return buildMemberIndex(r.rows);
+}
+
+// Links every unlinked payment to a resident. Safe to run repeatedly; it only fills
+// rows whose member_id is empty and never overwrites an existing link.
+async function mapLedgerToMembers({ useNames = true } = {}) {
+  await schemaReady;
+  const idx  = await loadIndex();
+  const rows = (await pool.query(
+    `SELECT id, payer_name, house_number, payment_date, amount, receipt_number
+     FROM payment_ledger WHERE member_id IS NULL ORDER BY payment_date, created_at`)).rows;
+  let byHouse = 0, byName = 0;
+  const unmapped = [];
+  for (const r of rows) {
+    const out = resolveResident(r.house_number, r.payer_name, idx, { useNames });
+    if (!out.member) { unmapped.push({ id: r.id, payment_date: r.payment_date, payer_name: r.payer_name,
+      house_number: r.house_number, amount: r.amount, receipt_number: r.receipt_number, reason: out.why }); continue; }
+    // A row without a house number takes the resident's house number from the match.
+    await pool.query(
+      `UPDATE payment_ledger SET member_id = $1,
+         house_number = CASE WHEN NULLIF(TRIM(COALESCE(house_number,'')),'') IS NULL THEN $2 ELSE house_number END
+       WHERE id = $3 AND member_id IS NULL`,
+      [out.member.id, out.member.house_number, r.id]);
+    if (out.how === 'house') byHouse++; else byName++;
+  }
+  return { checked: rows.length, linkedByHouse: byHouse, linkedByName: byName, unmapped };
 }
 
 // Normalise the free-form payment mode from the ledger
@@ -119,12 +255,11 @@ router.get('/', requireLogin, canManage, async (req, res) => {
     // The owner name is always mapped from the current members list (via house
     // number), so renaming a member updates the ledger automatically.
     //
-    // "Payment of previous dues" is flagged when either:
-    //  1. the recorder gave a duration and the amount is more than that duration
-    //     allows (e.g. more than one quarter's fee on a 1-quarter payment), or
-    //  2. the house's running total for the financial year passes the yearly
-    //     maintenance (also covers older rows that have no duration).
-    // Homes pay Rs. 4,000/quarter (16,000/yr); shops Rs. 750/quarter (3,000/yr).
+    // The remark is whatever the recorder chose / typed when recording the payment.
+    // Rows whose remark was never set (older entries) still show
+    // "Payment of previous dues" when the amount is more than the quarters it
+    // covers allow (one quarter if no duration was recorded): Rs. 4,000 per
+    // quarter for homes, Rs. 750 for shops. The running yearly total is NOT used.
     const result = await pool.query(
       `WITH enriched AS (
          SELECT pl.*,
@@ -141,8 +276,12 @@ router.get('/', requireLogin, canManage, async (req, res) => {
                 (CASE WHEN m.unit_type::text = 'shop' THEN ${QUARTER_FEE_SHOP}
                       ELSE ${QUARTER_FEE_HOME} END) AS quarter_fee
          FROM enriched e
-         LEFT JOIN members m
-           ON ${houseKeySql('m.house_number')} = ${houseKeySql('e.house_number')}
+         LEFT JOIN LATERAL (
+           SELECT mm.id, mm.full_name, mm.unit_type FROM members mm
+           WHERE mm.id = e.member_id
+              OR (e.member_id IS NULL AND ${houseKeySql('mm.house_number')} = ${houseKeySql('e.house_number')})
+           ORDER BY (mm.id = e.member_id) DESC, mm.is_active DESC LIMIT 1
+         ) m ON TRUE
        )
        SELECT j.id, j.payment_date,
               COALESCE(j.member_name, j.payer_name) AS payer_name,
@@ -153,10 +292,10 @@ router.get('/', requireLogin, canManage, async (req, res) => {
               j.cum_amount,
               j.member_id_ref AS member_id,
               CASE
-                WHEN NULLIF(TRIM(COALESCE(j.house_number,'')),'') IS NULL THEN ''
-                WHEN j.quarters_covered IS NOT NULL
-                     AND j.amount > j.quarters_covered * j.quarter_fee THEN 'Payment of previous dues'
-                WHEN j.cum_amount > 4 * j.quarter_fee THEN 'Payment of previous dues'
+                WHEN j.remark IS NOT NULL THEN j.remark
+                WHEN NULLIF(TRIM(COALESCE(j.house_number,'')),'') IS NOT NULL
+                     AND j.amount > COALESCE(j.quarters_covered, 1) * j.quarter_fee
+                  THEN 'Payment of previous dues'
                 ELSE ''
               END AS remark
        FROM joined j
@@ -228,7 +367,7 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
     const {
       paymentDate, payerName, houseNumber, description,
       amount, paymentMode, billBookNumber, receiptNumber,
-      quartersCovered, startQuarter,
+      quartersCovered, startQuarter, remark,
     } = req.body;
 
     await schemaReady;
@@ -240,15 +379,13 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
 
     // The owner name comes from the members list, keyed on house number.
     let ownerName = (payerName || '').trim();
-    const look = await pool.query(
-      `SELECT full_name, house_number FROM members
-       WHERE ${houseKeySql('house_number')} = ${houseKeySql('$1::text')} LIMIT 1`,
-      [houseNumber]
-    );
+    const found = resolveResident(houseNumber, null, await loadIndex(), { useNames: false });
+    let memberId = null;
     let canonicalHouse = houseNumber.trim();
-    if (look.rows.length) {
-      ownerName      = look.rows[0].full_name;
-      canonicalHouse = look.rows[0].house_number;   // store as in the members list
+    if (found.member) {
+      ownerName      = found.member.full_name;
+      canonicalHouse = found.member.house_number;   // store as in the members list
+      memberId       = found.member.id;
     }
     if (!ownerName) {
       return res.status(404).json({
@@ -264,20 +401,42 @@ router.post('/', requireLogin, canWrite, async (req, res) => {
       `INSERT INTO payment_ledger
         (payment_date, payer_name, house_number, description,
          amount, payment_mode, bill_book_number, receipt_number,
-         financial_year, recorded_by, start_quarter, quarters_covered)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         financial_year, recorded_by, start_quarter, quarters_covered, remark, member_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING id`,
       [paymentDate, ownerName, canonicalHouse,
        description || 'Maintenance', parseFloat(amount),
        normMode(paymentMode), billBookNumber || null,
        receiptNumber || null, financialYear, req.user.userId,
-       dur.start, dur.count]
+       dur.start, dur.count, cleanRemark(remark), memberId]
     );
 
     return res.status(201).json({ message: 'Payment recorded.', id: result.rows[0].id });
   } catch (err) {
     console.error('POST /ledger error:', err);
     return res.status(500).json({ error: `Could not record payment: ${err.message}` });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /api/ledger/unmapped — payments not yet linked to a resident
+// POST /api/ledger/map-residents — run the linking again (admin roles)
+// ─────────────────────────────────────────────────────────
+router.get('/unmapped', requireLogin, canManage, async (req, res) => {
+  try {
+    const r = await mapLedgerToMembers({ useNames: true });
+    return res.json({ unmapped: r.unmapped });
+  } catch (err) {
+    console.error('GET /ledger/unmapped error:', err);
+    return res.status(500).json({ error: 'Could not check unlinked payments.' });
+  }
+});
+router.post('/map-residents', requireLogin, canDelete, async (req, res) => {
+  try {
+    return res.json(await mapLedgerToMembers({ useNames: req.body.useNames !== false }));
+  } catch (err) {
+    console.error('POST /ledger/map-residents error:', err);
+    return res.status(500).json({ error: 'Could not link payments to residents.' });
   }
 });
 
@@ -295,6 +454,7 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
     }
 
     const succeeded = [], failed = [];
+    const idx = await loadIndex();
 
     for (let i = 0; i < payments.length; i++) {
       const r = payments[i];
@@ -305,17 +465,19 @@ router.post('/import', requireLogin, canDelete, async (req, res) => {
         const d  = new Date(r.paymentDate);
         const fy = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
         const financialYear = `${fy}-${String(fy + 1).slice(-2)}`;
+        const link  = resolveResident(r.houseNumber, r.payerName, idx);
+        const house = (r.houseNumber && String(r.houseNumber).trim()) || (link.member ? link.member.house_number : null);
 
         await pool.query(
           `INSERT INTO payment_ledger
             (payment_date, payer_name, house_number, description,
              amount, payment_mode, bill_book_number, receipt_number,
-             financial_year, recorded_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [r.paymentDate, r.payerName, r.houseNumber || null,
+             financial_year, recorded_by, member_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [r.paymentDate, r.payerName, house,
            r.description || 'Maintenance', parseFloat(r.amount),
            normMode(r.paymentMode), r.billBookNumber || null,
-           r.receiptNumber || null, financialYear, req.user.userId]
+           r.receiptNumber || null, financialYear, req.user.userId, link.member ? link.member.id : null]
         );
         succeeded.push(r.receiptNumber || r.payerName);
       } catch (e) {
@@ -346,6 +508,7 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
       amount, paymentMode, billBookNumber, receiptNumber,
       quartersCovered, startQuarter,
     } = req.body;
+    const remarkSent = Object.prototype.hasOwnProperty.call(req.body, 'remark');
 
     await schemaReady;
     const cur = await pool.query(`SELECT * FROM payment_ledger WHERE id = $1`, [id]);
@@ -354,15 +517,13 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
     // Keep the owner name mapped from the members list when a house number is given.
     let derivedName = payerName || null;
     let canonicalHouse = houseNumber || null;
+    let memberId = null;
     if (houseNumber) {
-      const look = await pool.query(
-        `SELECT full_name, house_number FROM members
-         WHERE ${houseKeySql('house_number')} = ${houseKeySql('$1::text')} LIMIT 1`,
-        [houseNumber]
-      );
-      if (look.rows.length) {
-        derivedName    = look.rows[0].full_name;
-        canonicalHouse = look.rows[0].house_number;
+      const found = resolveResident(houseNumber, null, await loadIndex(), { useNames: false });
+      if (found.member) {
+        derivedName    = found.member.full_name;
+        canonicalHouse = found.member.house_number;
+        memberId       = found.member.id;
       }
     }
 
@@ -399,13 +560,16 @@ router.patch('/:id', requireLogin, canDelete, async (req, res) => {
          financial_year   = COALESCE($9, financial_year),
          start_quarter    = CASE WHEN $11::boolean THEN $12::smallint ELSE start_quarter END,
          quarters_covered = CASE WHEN $11::boolean THEN $13::smallint ELSE quarters_covered END,
+         remark           = CASE WHEN $14::boolean THEN $15::text ELSE remark END,
+         member_id        = $16,
          updated_at       = NOW()
        WHERE id = $10`,
       [paymentDate || null, derivedName, canonicalHouse,
        description || null, amount !== undefined ? parseFloat(amount) : null,
        paymentMode ? normMode(paymentMode) : null,
        billBookNumber || null, receiptNumber || null, financialYear, id,
-       durationSent, durStart, durCount]
+       durationSent, durStart, durCount,
+       remarkSent, remarkSent ? cleanRemark(req.body.remark) : null, memberId]
     );
     return res.json({ message: 'Entry updated.' });
   } catch (err) {
@@ -431,3 +595,4 @@ router.delete('/:id', requireLogin, canDelete, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.houseKeySql = houseKeySql;
